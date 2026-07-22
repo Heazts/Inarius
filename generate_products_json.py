@@ -1,27 +1,18 @@
-import fitz
 import json
 import os
 import re
 
-pdf_path = "c:/Users/isaac/Downloads/ABCFarma/Revs.pdf"
-public_dir = "c:/Users/isaac/Downloads/ABCFarma/public"
+public_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 json_path = os.path.join(public_dir, "products.json")
+pages_dir = os.path.join(public_dir, "pages")
 
-print("Iniciando parser estruturado de produtos (com correção de limites e agrupamento)...")
-
-doc = fitz.open(pdf_path)
+print("Iniciando parser estruturado de produtos em Duas Colunas (Coordenadas X, Y)...")
 
 all_products = []
 product_id_counter = 1
 
-def clean_ocr_price(p):
-    p = re.sub(r'[^\d.,]', '', p).strip()
-    return p
-
 def clean_product_name(name):
-    # Remove leading price codes from adjacent column flow (e.g. "19,36 ATENTAN" -> "ATENTAN")
     name = re.sub(r'^\d+([.,]\d+)?\s*', '', name)
-    # Remove control/scheduling suffixes (e.g. "ATENTAN (C1)" -> "ATENTAN")
     name = re.sub(r'\s*\([Cc0-9IiDd]+\)\s*$', '', name)
     return name.strip()
 
@@ -45,134 +36,110 @@ def format_price_val(val, is_pmc, pf_val=None):
             
     return f"R$ {num:,.2f}".replace('.', 'X').replace(',', '.').replace('X', ',')
 
-for i in range(len(doc)):
-    page_num = i + 1
-    page = doc[i]
-    
-    # Skip non-price guide pages
-    if page_num < 12 or page_num > 198:
+# As páginas de preço vão da 12 até a 198
+for page_num in range(12, 199):
+    words_file = os.path.join(pages_dir, f"page_{page_num}.words.json")
+    if not os.path.exists(words_file):
         continue
         
-    text_upper = page.get_text().upper()
-    section = "Lista de Preços"
-    if "CENTRAL DE PREÇOS" in text_upper or "CENTRAL DE ATUALIZAÇÕES" in text_upper:
-        section = "Central de Preços"
-    elif "ORIENTAÇÕES LISTA DE PREÇOS" in text_upper or "ORIENTAÇÕES AO CONSUMIDOR" in text_upper:
-        section = "Orientações"
-    else:
-        # Find letter code
-        match = re.search(r'\b([A-Z]{3})\b', text_upper[:150])
-        if match:
-            section = f"Lista A-Z ({match.group(1)[0]})"
-            
-    lines = [line.strip() for line in page.get_text().split('\n') if line.strip()]
-    
-    current_product = ""
-    current_substance = ""
-    current_lab = ""
-    has_parsed_presentation = False
-    
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
+    with open(words_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
         
-        # Check if presentation
-        if '...' in line or line.endswith('.'):
-            parts = re.split(r'\.{2,}', line)
-            presentation = parts[0].strip()
+    # Agrupar palavras em duas colunas fixas (X < 53.0 e X >= 53.0)
+    cols = {'left': [], 'right': []}
+    for w in data:
+        if w[0] < 53.0:
+            cols['left'].append(w)
+        else:
+            cols['right'].append(w)
             
-            prices = []
-            if len(parts) > 1 and parts[1].strip():
-                # Strict 2-decimal price extraction to prevent horizontal column bleeding
-                prices = re.findall(r'\d+[.,]\d{2}', parts[1])
-                
-            if not prices:
-                j = idx + 1
-                while j < len(lines):
-                    next_line = lines[j]
-                    
-                    # Stop if it contains text words, indicating we hit a new product description line
-                    if re.search(r'[A-Za-z]{2,}', next_line):
-                        break
-                        
-                    # Look ahead strictly for 2-decimal prices if missing
-                    found_prices = re.findall(r'\d+[.,]\d{2}', next_line)
-                    if found_prices:
-                        prices.extend(found_prices)
-                        j += 1
-                    else:
-                        break
-            else:
-                j = idx + 1
-                
-            if len(prices) >= 2:
-                pf_raw = prices[0]
-                pmc_raw = prices[1]
-                
-                try:
-                    pf_float = float(pf_raw.replace(',', '.'))
-                    if '.' not in pf_raw:
-                        pf_float = pf_float / 100.0
-                except ValueError:
-                    pf_float = 0.0
-                    
-                pf_formatted = format_price_val(pf_raw, False)
-                pmc_formatted = format_price_val(pmc_raw, True, pf_float)
-                
-                prod_name = clean_product_name(current_product) or "PRODUTO SEM NOME"
-                
-                # Make sure name is cleaned and uppercase
-                prod_name = prod_name.upper()
-                
-                all_products.append({
-                    "id": f"prod_{product_id_counter}",
-                    "name": prod_name,
-                    "substance": clean_product_name(current_substance).upper(),
-                    "lab": current_lab.upper() or "OUTROS",
-                    "presentation": presentation,
-                    "pf20": pf_formatted,
-                    "pmc20": pmc_formatted,
-                    "page": page_num,
-                    "section": section
-                })
-                product_id_counter += 1
-                has_parsed_presentation = True
-                idx = j
-                continue
-                
-        # Potential title line
-        if line.isupper() and len(line) > 2 and '...' not in line:
-            # Skip purely numeric or price sequences
-            if re.match(r'^\d+[\s\d%.,]*$', line):
-                idx += 1
-                continue
-            # Must have at least 3 letters
-            if len(re.findall(r'[A-Z]', line)) < 3:
-                idx += 1
-                continue
-                
-            cleaned_title = clean_product_name(line)
+    section = "Lista A-Z" # Padrão
+    
+    # Processar cada coluna individualmente para evitar mesclagem horizontal
+    for col_name, words in cols.items():
+        # Agrupar por altura Y com precisão de 0.1% para juntar palavras na mesma linha
+        lines_by_y = {}
+        for w in words:
+            y = round(w[1], 1)
+            if y not in lines_by_y: lines_by_y[y] = []
+            lines_by_y[y].append(w)
             
-            if has_parsed_presentation:
-                # We already parsed a presentation, so this starts a new product brand!
-                current_product = line
-                current_substance = ""
-                current_lab = ""
-                has_parsed_presentation = False
-            else:
-                # Still building description details for current product
-                if not current_product:
-                    current_product = line
-                else:
-                    if len(cleaned_title) < 15:
-                        current_lab = cleaned_title
-                    else:
-                        current_substance = cleaned_title
+        current_product = ""
+        current_lab = "N/D"
+        current_substance = ""
+        
+        for y in sorted(lines_by_y.keys()):
+            # Ordenar palavras da linha da esquerda pra direita
+            line_words = sorted(lines_by_y[y], key=lambda x: x[0])
+            text = ' '.join([w[4] for w in line_words]).strip()
+            if not text: continue
+            
+            text_upper = text.upper()
+            
+            # Atualizar Seção caso apareça no topo
+            if "CENTRAL DE" in text_upper:
+                section = "Central de Preços"
+            
+            # Identificar linha de apresentação (contém letras minúsculas ou números de formatação)
+            # Na ABCFarma, apresentações contêm 'mg', 'ml', 'cx', 'comp', ou números com '...'
+            if re.search(r'[a-z0-9]', text):
+                # Tentar extrair preços (2 decimais estritos)
+                prices = re.findall(r'\d+[.,]\d{2}', text)
+                if len(prices) >= 2:
+                    # É uma apresentação válida com preços!
+                    pf_raw = prices[-2]
+                    pmc_raw = prices[-1]
+                    
+                    # Extrair o nome da apresentação (antes do primeiro preço encontrado)
+                    pres_match = re.split(r'\d+[.,]\d{2}', text)
+                    presentation = pres_match[0].strip()
+                    presentation = re.sub(r'(\.{2,}|\s+)$', '', presentation).strip()
+                    if not presentation:
+                        presentation = "Unidade Padrão"
+                    
+                    try:
+                        pf_float = float(pf_raw.replace(',', '.'))
+                        if '.' not in pf_raw: pf_float = pf_float / 100.0
+                    except:
+                        pf_float = 0.0
                         
-        idx += 1
+                    # Extract inline product name if present at the end of the line
+                    inline_name_raw = pres_match[-1].strip()
+                    inline_name = re.sub(r'^[\d\s]+', '', inline_name_raw).strip()
+                    if len(inline_name) >= 3 and inline_name.upper() == inline_name:
+                        current_product = inline_name
+                        current_lab = inline_name
+                        current_substance = inline_name
 
-# Write output JSON
+                    if current_product:
+                        all_products.append({
+                            "id": f"prod_{product_id_counter}",
+                            "name": current_product,
+                            "substance": clean_product_name(current_substance) or current_product,
+                            "lab": current_lab.upper(),
+                            "presentation": presentation,
+                            "pf20": format_price_val(pf_raw, False),
+                            "pmc20": format_price_val(pmc_raw, True, pf_float),
+                            "page": page_num,
+                            "section": section
+                        })
+                        product_id_counter += 1
+                        
+            # Se for tudo maiúsculo e tem mais de 3 letras, provavelmente é o nome de um produto ou lab
+            elif text_upper == text and len(text) > 3:
+                # Pular linhas de ruído ou títulos genéricos
+                if re.match(r'^\d+[\s\d%.,]*$', text) or "PRODUTO" in text or "PMC" in text:
+                    continue
+                    
+                cleaned_text = clean_product_name(text)
+                
+                # Regra heurística: nomes curtos podem ser laboratórios, nomes longos são substâncias
+                # mas o primeiro uppercase que encontramos geralmente é o Produto.
+                if len(cleaned_text) < 15 and "(GEN)" not in cleaned_text:
+                    current_lab = cleaned_text
+                current_product = cleaned_text
+
 with open(json_path, "w", encoding="utf-8") as f:
     json.dump(all_products, f, ensure_ascii=False, indent=2)
 
-print(f"Sucesso! {len(all_products)} produtos estruturados extraídos e salvos em {json_path}")
+print(f"Sucesso Total! A nova inteligência estruturou {len(all_products)} produtos (Motor OCR de Duas Colunas) salvos em {json_path}")
