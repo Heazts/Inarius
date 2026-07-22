@@ -1,7 +1,7 @@
 {
-  "name": "abcfarma-search",
+  "name": "inarius",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.0.1-beta",
   "type": "module",
   "scripts": {
     "dev": "vite",
