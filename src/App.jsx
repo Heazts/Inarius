@@ -97,24 +97,32 @@ export default function App() {
     }
 
     if (results.length === 0) {
-      const queryClean = query.trim().toUpperCase();
-      
-      // Advanced sub-string fallback: handles spelling variations (e.g. Atentah/Atenta/Atentan OCR noise)
-      if (queryClean.length >= 3) {
-        const baseQuery = queryClean.replace(/[HN]$/, '');
-        
-        results = productsData.filter(p => {
-          const nameClean = p.name.replace(/[HN]$/, '');
-          const substanceClean = p.substance ? p.substance.replace(/[HN]$/, '') : '';
-          return nameClean.includes(baseQuery) || 
-                 substanceClean.includes(baseQuery) ||
-                 p.lab.includes(queryClean);
+      const normalizeStr = (str) =>
+        (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+      const queryClean = normalizeStr(query.trim());
+
+      if (queryClean.length >= 2) {
+        results = productsData.filter((p) => {
+          const nameNorm = normalizeStr(p.name);
+          const substanceNorm = normalizeStr(p.substance);
+          const labNorm = normalizeStr(p.lab);
+          const presNorm = normalizeStr(p.presentation);
+
+          return (
+            nameNorm.includes(queryClean) ||
+            substanceNorm.includes(queryClean) ||
+            labNorm.includes(queryClean) ||
+            presNorm.includes(queryClean)
+          );
         });
-        
-        // Sort matching results: exact prefix matches first
+
+        // Priority sorting: exact name prefix matches first
         results.sort((a, b) => {
-          const aStart = a.name.startsWith(queryClean);
-          const bStart = b.name.startsWith(queryClean);
+          const aName = normalizeStr(a.name);
+          const bName = normalizeStr(b.name);
+          const aStart = aName.startsWith(queryClean);
+          const bStart = bName.startsWith(queryClean);
           if (aStart && !bStart) return -1;
           if (!aStart && bStart) return 1;
           return 0;

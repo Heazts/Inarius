@@ -196,9 +196,9 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
     return { leftRuler, rightRuler };
   }, [pageWords]);
 
-  // Panning Event Handlers (Native scroll manipulation)
   const handleMouseDown = (e) => {
-    e.preventDefault();
+    // Enable free drag panning on left mouse click
+    if (e.button !== 0) return;
     const viewport = document.getElementById('pdf-viewport');
     if (viewport) {
       setIsPanning(true);
@@ -213,6 +213,7 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
 
   const handleMouseMove = (e) => {
     if (!isPanning) return;
+    e.preventDefault();
     const viewport = document.getElementById('pdf-viewport');
     if (viewport) {
       const dx = e.clientX - startPos.x;
@@ -377,7 +378,7 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
               loading="eager"
             />
 
-            {/* Keyword highlights overlay */}
+            {/* Keyword highlights overlay in VIVID RED */}
             {matchedRects.map((w, idx) => (
               <div
                 key={idx}
@@ -387,8 +388,9 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
                   top: `${w[1]}%`,
                   width: `${w[2] - w[0]}%`,
                   height: `${w[3] - w[1]}%`,
-                  backgroundColor: 'rgba(0, 112, 243, 0.2)', // Vivid Blue highlight overlay
-                  border: '2px solid #0070f3',
+                  backgroundColor: 'rgba(239, 68, 68, 0.3)', // Vivid Red highlight overlay
+                  border: '2px solid #ef4444',
+                  boxShadow: '0 0 8px rgba(239, 68, 68, 0.6)',
                   borderRadius: '2px',
                   pointerEvents: 'none',
                   zIndex: 10
@@ -396,7 +398,7 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
               />
             ))}
 
-            {/* High Precision 20% PMC Column Highlight Ruler Guides (Dynamic alignment) */}
+            {/* High Precision 20% PMC Column Highlight Ruler Guides (Vivid BLUE Lines) */}
             {showRuler && currentPage >= 12 && currentPage <= 198 && (
               <>
                 {/* Left Column 20% Guide */}
@@ -406,12 +408,27 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
                   top: '10.5%',
                   width: `${calculatedRulers.leftRuler.width}%`,
                   height: '88.5%',
-                  backgroundColor: 'rgba(0, 112, 243, 0.05)', // soft blue stripe
-                  borderLeft: '1.5px solid #0070f3', // Sharp precision blue line
-                  borderRight: '1.5px solid #0070f3',
+                  backgroundColor: 'rgba(0, 112, 243, 0.08)', // soft blue stripe
+                  borderLeft: '2px solid #0070f3', // Sharp precision blue line
+                  borderRight: '2px solid #0070f3',
+                  boxShadow: '0 0 6px rgba(0, 112, 243, 0.4)',
                   pointerEvents: 'none',
                   zIndex: 5
-                }} />
+                }}>
+                  <div style={{
+                    position: 'absolute',
+                    top: '-18px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    backgroundColor: '#0070f3',
+                    color: '#ffffff',
+                    fontSize: '0.55rem',
+                    fontWeight: 800,
+                    padding: '1px 4px',
+                    borderRadius: '2px',
+                    whiteSpace: 'nowrap'
+                  }}>PMC 20%</div>
+                </div>
                 {/* Right Column 20% Guide */}
                 <div style={{
                   position: 'absolute',
@@ -419,12 +436,27 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
                   top: '10.5%',
                   width: `${calculatedRulers.rightRuler.width}%`,
                   height: '88.5%',
-                  backgroundColor: 'rgba(0, 112, 243, 0.05)',
-                  borderLeft: '1.5px solid #0070f3',
-                  borderRight: '1.5px solid #0070f3',
+                  backgroundColor: 'rgba(0, 112, 243, 0.08)',
+                  borderLeft: '2px solid #0070f3',
+                  borderRight: '2px solid #0070f3',
+                  boxShadow: '0 0 6px rgba(0, 112, 243, 0.4)',
                   pointerEvents: 'none',
                   zIndex: 5
-                }} />
+                }}>
+                  <div style={{
+                    position: 'absolute',
+                    top: '-18px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    backgroundColor: '#0070f3',
+                    color: '#ffffff',
+                    fontSize: '0.55rem',
+                    fontWeight: 800,
+                    padding: '1px 4px',
+                    borderRadius: '2px',
+                    whiteSpace: 'nowrap'
+                  }}>PMC 20%</div>
+                </div>
               </>
             )}
           </div>
