@@ -1,3 +1,4 @@
+import React, { useState, useEffect, useMemo } from 'react';
 import Header from './components/Header';
 import SearchBar from './components/SearchBar';
 import ResultCard from './components/ResultCard';
