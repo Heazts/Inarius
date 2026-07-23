@@ -1,8 +1,24 @@
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;850&family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap');
 
-/* Global Variables */
+/* Global Variables & Dark Default System */
 :root {
-  --border-radius: 4px;
+  --font-sans: 'Plus Jakarta Sans', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --bg-app: #000000;
+  --bg-surface: #171717;
+  --bg-surface-elevated: #171717;
+  --bg-card: #000000;
+  --bg-card-hover: #171717;
+  --border-color: #262626;
+  --border-hover: #404040;
+  --border-active: #0070F3;
+  --text-primary: #FFFFFF;
+  --text-secondary: #A3A3A3;
+  --text-muted: #737373;
+  --accent-primary: #0070F3;
+  --accent-secondary: #FAFAFA;
+  --accent-glow: rgba(0, 112, 243, 0.2);
+  --border-radius: 6px;
 }
 
 /* ========================================== */
@@ -62,11 +78,12 @@
 
 html, body {
   border-radius: 0;
-  background-color: #000000; /* Force dark background */
+  background-color: #000000 !important;
+  color: #ffffff !important;
 }
 
 body {
-  background-color: var(--bg-app);
+  background-color: #000000 !important;
   color: var(--text-primary);
   min-height: 100vh;
   line-height: 1.5;
