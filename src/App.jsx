@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import MiniSearch from 'minisearch';
 import Header from './components/Header';
 import SearchBar from './components/SearchBar';
 import ResultCard from './components/ResultCard';
 import PdfViewer from './components/PdfViewer';
 import Sidebar from './components/Sidebar';
 import { Search } from 'lucide-react';
+import { executeSearch } from './utils/searchEngine';
 
 export default function App() {
   const [pagesData, setPagesData] = useState([]);
@@ -43,19 +43,6 @@ export default function App() {
     );
   };
 
-  // Initialize MiniSearch Index (Product-level search)
-  const miniSearch = useMemo(() => {
-    return new MiniSearch({
-      fields: ['name', 'lab', 'presentation', 'substance'],
-      storeFields: ['id', 'name', 'lab', 'presentation', 'pf20', 'pmc20', 'page', 'section'],
-      searchOptions: {
-        boost: { name: 3, substance: 2, lab: 1.5, presentation: 1 },
-        fuzzy: 0.15, // Higher precision (was 0.3)
-        prefix: true
-      }
-    });
-  }, []);
-
   // Fetch JSON databases in parallel on startup
   useEffect(() => {
     Promise.all([
@@ -65,18 +52,15 @@ export default function App() {
       .then(([pages, products]) => {
         setPagesData(pages);
         setProductsData(products);
-        
-        miniSearch.removeAll();
-        miniSearch.addAll(products);
         setLoading(false);
       })
       .catch((err) => {
         console.error('Erro ao carregar os dados cadastrados:', err);
         setLoading(false);
       });
-  }, [miniSearch]);
+  }, []);
 
-  // Execute reactive search inside useEffect
+  // Execute reactive search using our high-precision Multi-Token & Fuzzy Search Engine
   useEffect(() => {
     if (!query.trim() || productsData.length === 0) {
       setSearchResults([]);
@@ -85,68 +69,11 @@ export default function App() {
     }
 
     const t0 = performance.now();
-    let results = [];
 
-    // Direct page number match (e.g. "p.51", "51")
-    const pageMatch = query.match(/^(?:p(?:ág|ag)?\.?\s*)?(\d{1,3})$/i);
-    if (pageMatch) {
-      const pageNum = parseInt(pageMatch[1], 10);
-      if (pageNum >= 1 && pageNum <= 200) {
-        results = productsData.filter((p) => p.page === pageNum);
-      }
-    }
+    // 1. Execute Multi-Token + Fuzzy Engine Search
+    let results = executeSearch(productsData, query);
 
-    if (results.length === 0) {
-      const normalizeStr = (str) =>
-        (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-
-      const queryClean = normalizeStr(query.trim());
-
-      if (queryClean.length >= 2) {
-        results = productsData.filter((p) => {
-          const nameNorm = normalizeStr(p.name);
-          const substanceNorm = normalizeStr(p.substance);
-          const labNorm = normalizeStr(p.lab);
-          const presNorm = normalizeStr(p.presentation);
-
-          return (
-            nameNorm.includes(queryClean) ||
-            substanceNorm.includes(queryClean) ||
-            labNorm.includes(queryClean) ||
-            presNorm.includes(queryClean)
-          );
-        });
-
-        // Priority sorting: exact name prefix matches first
-        results.sort((a, b) => {
-          const aName = normalizeStr(a.name);
-          const bName = normalizeStr(b.name);
-          const aStart = aName.startsWith(queryClean);
-          const bStart = bName.startsWith(queryClean);
-          if (aStart && !bStart) return -1;
-          if (!aStart && bStart) return 1;
-          return 0;
-        });
-      }
-      
-      // If substring search yields no results, fall back to MiniSearch fuzzy search
-      if (results.length === 0) {
-        const rawResults = miniSearch.search(query.trim());
-        results = rawResults.map((r) => ({
-          id: r.id,
-          name: r.name,
-          lab: r.lab,
-          presentation: r.presentation,
-          pf20: r.pf20,
-          pmc20: r.pmc20,
-          page: r.page,
-          section: r.section,
-          score: r.score
-        }));
-      }
-    }
-
-    // Filter by selected category pill
+    // 2. Filter by selected category pill
     if (selectedCategory === 'Favoritos') {
       results = results.filter((item) => favorites.includes(item.id));
     } else if (selectedCategory !== 'Tudo') {
@@ -156,7 +83,7 @@ export default function App() {
     const t1 = performance.now();
     setSearchTimeMs(t1 - t0);
     setSearchResults(results);
-  }, [query, productsData, selectedCategory, miniSearch]);
+  }, [query, productsData, selectedCategory, favorites]);
 
   // Auto-select the first product result when searchResults updates
   useEffect(() => {
