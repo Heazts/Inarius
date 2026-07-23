@@ -131,6 +131,13 @@ export default function ResultCard({ item, query, onSelectProduct, isSelected, i
                 <span>Substância: <strong>{highlightText(item.substance, query)}</strong></span>
               </p>
             )}
+            {item.isFonteGrande && (
+              <div style={{ marginTop: '0.35rem' }}>
+                <span style={{ fontSize: '0.62rem', fontWeight: 800, padding: '2px 6px', borderRadius: '3px', backgroundColor: 'var(--accent-glow)', color: 'var(--accent-primary)', border: '1px solid var(--accent-primary)' }}>
+                  Fonte Alternativa: Fonte Grande CMED (PMC 20% Ceará)
+                </span>
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>

@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
 import Header from './components/Header';
 import SearchBar from './components/SearchBar';
 import ResultCard from './components/ResultCard';
 import PdfViewer from './components/PdfViewer';
 import Sidebar from './components/Sidebar';
 import { Search } from 'lucide-react';
-import { executeSearch } from './utils/searchEngine';
+import { executeSearch } from './utils/searchEngine.js';
 
 export default function App() {
   const [pagesData, setPagesData] = useState([]);
@@ -17,6 +16,7 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState('Tudo');
   const [currentPage, setCurrentPage] = useState(1);
   const [designStyle, setDesignStyle] = useState('vercel'); // Design system selector (grok or vercel)
+  const [dataSource, setDataSource] = useState('principal'); // Data source selector (principal or fonte_grande)
   const [showHelp, setShowHelp] = useState(false);
   const [searchTimeMs, setSearchTimeMs] = useState(null);
   
@@ -43,11 +43,14 @@ export default function App() {
     );
   };
 
-  // Fetch JSON databases in parallel on startup
+  // Fetch JSON databases based on selected data source
   useEffect(() => {
+    setLoading(true);
+    const targetProductsPath = dataSource === 'fonte_grande' ? '/fonte_grande.json' : '/products.json';
+
     Promise.all([
       fetch('/pdf_data.json').then((res) => res.json()),
-      fetch('/products.json').then((res) => res.json())
+      fetch(targetProductsPath).then((res) => res.json())
     ])
       .then(([pages, products]) => {
         setPagesData(pages);
@@ -58,7 +61,7 @@ export default function App() {
         console.error('Erro ao carregar os dados cadastrados:', err);
         setLoading(false);
       });
-  }, []);
+  }, [dataSource]);
 
   // Execute reactive search using our high-precision Multi-Token & Fuzzy Search Engine
   useEffect(() => {
@@ -128,6 +131,8 @@ export default function App() {
       <Header
         designStyle={designStyle}
         setDesignStyle={setDesignStyle}
+        dataSource={dataSource}
+        setDataSource={setDataSource}
         totalProducts={productsData.length}
         onShowHelp={() => setShowHelp(true)}
       />
