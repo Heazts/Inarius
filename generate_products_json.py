@@ -2,40 +2,26 @@ import json
 import os
 import re
 
+# Nota sobre OCR real (Tesseract): ja foi tentado usar OCR na imagem
+# renderizada de cada pagina como fonte do texto de nome/laboratorio/
+# substancia, para contornar casos onde a propria camada de texto do PDF
+# decodifica um glifo errado (ex: o produto "ATENTAH" saia como "ATENTAN"
+# -- confirmado comparando com a pagina impressa). OCR le esse caso
+# especifico corretamente, mas validando numa amostra maior de produtos
+# (nao so o caso isolado que motivou o teste) o resultado agregado foi pior:
+# como as linhas desta tabela ficam bem proximas verticalmente, um recorte
+# por linha frequentemente pega texto de apresentacao/preco vazando da
+# linha vizinha (ex: um laboratorio "SANOFI/MEDLEY" virando "OFI/I FEAR
+# ASTESD"), e nao ha como distinguir isso do texto certo por tamanho ou
+# confianca do OCR -- ambos leem "limpo", so que da linha errada. Por isso
+# o texto de nome/laboratorio/substancia continua vindo so da extracao por
+# coordenadas (PyMuPDF), que erra menos no agregado apesar de nao pegar
+# alguns casos pontuais como o do ATENTAH.
 public_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 json_path = os.path.join(public_dir, "products.json")
 pages_dir = os.path.join(public_dir, "pages")
 
-# OCR real (Tesseract) sobre a imagem renderizada de cada pagina, usado como
-# fonte primaria do texto de nome/laboratorio/substancia -- nao dos precos.
-#
-# O que este script chamava de "OCR" ate aqui era, na verdade, o texto
-# embutido no PDF (PyMuPDF), nao reconhecimento de imagem. Para varios
-# produtos esse texto embutido vem com caracteres trocados por causa de um
-# problema de codificacao de fonte no PDF original (ex: o produto "ATENTAH"
-# saia como "ATENTAN" -- confirmado comparando com a pagina impressa). Testei
-# rodar OCR de verdade na imagem renderizada e ele le esses nomes
-# corretamente, porque a imagem mostra o glifo real, sem depender do mapa de
-# caracteres corrompido do PDF. Já nas colunas de preco (numeros muito densos,
-# colados um no outro) o OCR nao ajuda -- testado e confirmado que erra tanto
-# quanto o texto extraido do PDF -- entao os precos continuam vindo só da
-# extracao por coordenadas.
-#
-# Requer `pip install pillow pytesseract` e o binario `tesseract` instalado
-# (`apt install tesseract-ocr tesseract-ocr-por` no Linux). Se algo disso
-# faltar, o script funciona do mesmo jeito, só sem essa melhoria de nomes.
-try:
-    from PIL import Image
-    import pytesseract
-    from pytesseract import Output
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
 print("Iniciando parser estruturado de produtos (motor com deteccao de tabela por coordenadas)...")
-if not OCR_AVAILABLE:
-    print("Aviso: PIL/pytesseract nao encontrados -- rodando sem a melhoria de OCR nos nomes.")
-    print("Para ativar: pip install pillow pytesseract  (e instalar o binario tesseract-ocr + tesseract-ocr-por)")
 
 # --- Constantes de geometria da tabela --------------------------------------
 # As paginas de preco sao impressas em duas "meias-tabelas" (colunas) lado a
@@ -77,9 +63,6 @@ OCR_CHAR_FIXES = [
     ('€', 'C'),
     ('«', 'x'),
 ]
-
-# Idioma usado pelo OCR real (Tesseract) para nome/laboratorio/substancia.
-OCR_LANG = "por"
 
 PRICE_DECIMAL_RE = re.compile(r'^\d+,\d{1,2}$')
 PRICE_BARE_RE = re.compile(r'^\d{2,6}\]?$')
@@ -222,13 +205,9 @@ def split_name_lab(words):
     """Separa uma linha de nome/produto em (nome, laboratorio) procurando o
     maior espaco horizontal entre palavras consecutivas. So considera que ha
     um laboratorio separado se esse espaco for bem maior do que o espaco
-    normal entre palavras de uma mesma frase.
-
-    Alem das duas listas de palavras, retorna tambem a posicao X do corte
-    (ou None se nao houve corte) -- usado para delimitar a zona de nome vs.
-    a zona de laboratorio ao consultar o indice de OCR."""
+    normal entre palavras de uma mesma frase."""
     if len(words) <= 1:
-        return [t for _, t in words], [], None
+        return [t for _, t in words], []
 
     best_gap = 0.0
     split_at = None
@@ -239,75 +218,9 @@ def split_name_lab(words):
             split_at = i
 
     if best_gap < NAME_LAB_GAP_THRESHOLD:
-        return [t for _, t in words], [], None
+        return [t for _, t in words], []
 
-    split_x = (words[split_at - 1][0] + words[split_at][0]) / 2
-    return [t for _, t in words[:split_at]], [t for _, t in words[split_at:]], split_x
-
-
-# Uma primeira versao disto rodava o OCR uma unica vez por meia-coluna
-# inteira (rapido, ~3s) e depois cruzava as palavras reconhecidas com cada
-# linha pela posicao (x, y). Na pratica isso nao foi confiavel: o Tesseract
-# quebra as linhas de um jeito que nem sempre bate com o agrupamento de
-# linhas feito a partir das coordenadas do PDF, e a tentativa de "achar a
-# janela de Y certa" ou vazava numeros de uma linha vizinha para dentro do
-# nome (janela larga demais) ou perdia palavras isoladas no meio da coluna
-# (rodando com um modo de pagina mais rapido). Recortar e rodar OCR so na
-# regiao exata de CADA linha de nome/laboratorio -- mais chamadas ao
-# Tesseract, mas cada uma sobre uma imagem pequena e isolada -- foi o que
-# realmente reproduziu a leitura correta (ex: "ATENTAH") de forma
-# consistente.
-OCR_MARGIN_PCT = 0.15
-
-# Um recorte apertado de uma unica linha, quando a linha de cima esta bem
-# proxima (comum nesta tabela), quase sempre pega uma sobra borrada da linha
-# anterior -- o Tesseract le esse borrao como uma "palavra" curta e de baixa
-# confianca (ex: "os", "tt", "Ma", geralmente <=3 caracteres e conf < 60),
-# bem diferente do texto real (nomes/codigos/labs, quase sempre 4+
-# caracteres OU lidos com confianca alta). Descartar so os tokens que batem
-# nesse perfil (curto E baixa confianca) filtra essa sobra sem arriscar
-# cortar texto de verdade -- testado contra tentativas de "aparar" um
-# pedaco fixo do topo do recorte, que ora deixava passar a sobra, ora
-# cortava letras reais (a proporcao de sobra varia de linha a linha).
-OCR_MIN_TOKEN_LEN = 4
-OCR_MIN_CONF_FOR_SHORT_TOKEN = 60
-
-
-def ocr_crop_region(image, page_w, page_h, x_min_pct, y_min_pct, x_max_pct, y_max_pct):
-    """Recorta uma regiao da pagina (em percentual) e roda o Tesseract nela,
-    devolvendo o texto reconhecido (descartando fragmentos curtos e de baixa
-    confianca, tipicos de sobra da linha vizinha -- ver comentario acima)."""
-    if not OCR_AVAILABLE:
-        return ""
-
-    left = max(0, int((x_min_pct - OCR_MARGIN_PCT) / 100 * page_w))
-    right = min(page_w, int((x_max_pct + OCR_MARGIN_PCT) / 100 * page_w))
-    top = max(0, int((y_min_pct - OCR_MARGIN_PCT) / 100 * page_h))
-    bottom = min(page_h, int((y_max_pct + OCR_MARGIN_PCT) / 100 * page_h))
-
-    if right <= left or bottom <= top:
-        return ""
-
-    try:
-        crop = image.crop((left, top, right, bottom))
-        data = pytesseract.image_to_data(crop, lang=OCR_LANG, config="--psm 6", output_type=Output.DICT)
-    except Exception:
-        # Uma falha isolada de OCR num recorte nao deve derrubar a pagina
-        # inteira -- so faz essa linha cair de volta pro texto do PyMuPDF.
-        return ""
-
-    tokens = []
-    for i in range(len(data['text'])):
-        token = data['text'][i].strip()
-        if not token:
-            continue
-        conf = data['conf'][i]
-        if len(token) < OCR_MIN_TOKEN_LEN and conf < OCR_MIN_CONF_FOR_SHORT_TOKEN:
-            continue
-        tokens.append((data['left'][i], token))
-
-    tokens.sort(key=lambda t: t[0])
-    return ' '.join(t for _, t in tokens).strip()
+    return [t for _, t in words[:split_at]], [t for _, t in words[split_at:]]
 
 
 def nearest_anchor_index(rel_x, anchors, max_dist=3.0):
@@ -399,7 +312,7 @@ def split_by_price_collision(words, col_start, pf_anchors, pmc_anchors, price_zo
     return [sorted(r, key=lambda w: w[0]) for r in result_rows]
 
 
-def process_column(rows, col_start, image=None, page_w=None, page_h=None):
+def process_column(rows, col_start):
     global product_id_counter
 
     pf_anchors, pmc_anchors = detect_price_anchors(rows, col_start)
@@ -459,46 +372,28 @@ def process_column(rows, col_start, image=None, page_w=None, page_h=None):
             if all((x - col_start) >= price_zone_start for x, _ in words):
                 continue
 
-            name_words, lab_words, split_x = split_name_lab(words)
-
-            # Zona (Y e X) desta linha em percentual de pagina, para recortar
-            # a imagem e rodar o OCR -- o `words` local ja perdeu o Y ao ser
-            # montado logo acima, entao usamos `row`, a tupla original.
-            row_y_min = min(w[1] for w in row)
-            row_y_max = max(w[3] for w in row)
-            row_x_min = min(w[0] for w in row)
-            row_x_max = max(w[2] for w in row)
-            can_ocr = image is not None and page_w and page_h
+            name_words, lab_words = split_name_lab(words)
 
             if expect_name:
-                name_zone_end = split_x if split_x is not None else row_x_max
-                ocr_name = ocr_crop_region(image, page_w, page_h, row_x_min, row_y_min, name_zone_end, row_y_max) if can_ocr else ""
-                fallback_name = ' '.join(name_words) if name_words else joined
-                current_name = clean_product_name(ocr_name or fallback_name)
-
-                if split_x is not None:
-                    ocr_lab = ocr_crop_region(image, page_w, page_h, split_x, row_y_min, row_x_max, row_y_max) if can_ocr else ""
-                    fallback_lab = ocr_lab or ' '.join(lab_words)
-                    current_lab = fallback_lab.upper() if fallback_lab else "N/D"
+                current_name = clean_product_name(' '.join(name_words)) if name_words else clean_product_name(joined)
+                if lab_words:
+                    current_lab = ' '.join(lab_words).upper()
                 else:
                     current_lab = "N/D"
                 current_substance = None
                 expect_name = False
                 expect_substance = True
             elif expect_substance:
-                ocr_substance = ocr_crop_region(image, page_w, page_h, row_x_min, row_y_min, row_x_max, row_y_max) if can_ocr else ""
-                current_substance = clean_product_name(ocr_substance or joined)
+                current_substance = clean_product_name(joined)
                 if lab_words and current_lab == "N/D":
                     current_lab = ' '.join(lab_words).upper()
                 expect_substance = False
             else:
                 # Continuacao de um nome/substancia que quebrou em mais de uma linha
-                ocr_continuation = ocr_crop_region(image, page_w, page_h, row_x_min, row_y_min, row_x_max, row_y_max) if can_ocr else ""
-                continuation_text = clean_product_name(ocr_continuation or joined)
                 if current_substance:
-                    current_substance = f"{current_substance} {continuation_text}".strip()
+                    current_substance = f"{current_substance} {clean_product_name(joined)}".strip()
                 else:
-                    current_substance = continuation_text
+                    current_substance = clean_product_name(joined)
             continue
 
         # Linha de apresentacao/precos. Uma linha deste tipo sempre marca o
@@ -565,29 +460,14 @@ def process_column(rows, col_start, image=None, page_w=None, page_h=None):
         product_id_counter += 1
 
 
-def process_page(words, page_num, section, image_path):
+def process_page(words, page_num, section):
     col_split = find_column_split(words)
     left_words = [w for w in words if w[0] < col_split]
     right_words = [w for w in words if w[0] >= col_split]
 
     start_index = len(all_products)
-
-    image = None
-    page_w = page_h = None
-    if OCR_AVAILABLE and image_path and os.path.exists(image_path):
-        try:
-            image = Image.open(image_path)
-            page_w, page_h = image.size
-        except Exception as exc:
-            print(f"Aviso: nao foi possivel abrir a imagem da pagina {page_num} para OCR: {exc}")
-            image = None
-
-    try:
-        process_column(cluster_rows(left_words), col_start=0.0, image=image, page_w=page_w, page_h=page_h)
-        process_column(cluster_rows(right_words), col_start=col_split, image=image, page_w=page_w, page_h=page_h)
-    finally:
-        if image is not None:
-            image.close()
+    process_column(cluster_rows(left_words), col_start=0.0)
+    process_column(cluster_rows(right_words), col_start=col_split)
 
     for product in all_products[start_index:]:
         product["page"] = page_num
@@ -596,8 +476,6 @@ def process_page(words, page_num, section, image_path):
 
 # As paginas de preco vao da 12 ate a 198
 section = "Lista A-Z"
-total_pages = sum(1 for p in range(12, 199) if os.path.exists(os.path.join(pages_dir, f"page_{p}.words.json")))
-pages_done = 0
 for page_num in range(12, 199):
     words_file = os.path.join(pages_dir, f"page_{page_num}.words.json")
     if not os.path.exists(words_file):
@@ -610,12 +488,7 @@ for page_num in range(12, 199):
     if "CENTRAL DE" in page_text_upper:
         section = "Central de Precos"
 
-    image_path = os.path.join(pages_dir, f"page_{page_num}.jpg")
-    process_page(data, page_num, section, image_path)
-
-    pages_done += 1
-    if OCR_AVAILABLE and pages_done % 20 == 0:
-        print(f"OCR: {pages_done}/{total_pages} paginas processadas...")
+    process_page(data, page_num, section)
 
 with open(json_path, "w", encoding="utf-8") as f:
     json.dump(all_products, f, ensure_ascii=False, indent=2)
