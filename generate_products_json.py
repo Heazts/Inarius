@@ -6,140 +6,346 @@ public_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 json_path = os.path.join(public_dir, "products.json")
 pages_dir = os.path.join(public_dir, "pages")
 
-print("Iniciando parser estruturado de produtos em Duas Colunas (Coordenadas X, Y)...")
+print("Iniciando parser estruturado de produtos (motor com deteccao de tabela por coordenadas)...")
+
+# --- Constantes de geometria da tabela --------------------------------------
+# As paginas de preco sao impressas em duas "meias-tabelas" (colunas) lado a
+# lado. O ponto de corte entre elas varia um pouco de pagina a pagina, entao
+# ele e detectado dinamicamente (ver find_column_split) em vez de um valor
+# fixo. 44.5 e usado apenas como fallback para paginas sem uma quebra clara
+# (ex: capa, orientacoes).
+DEFAULT_COL_SPLIT = 44.5
+COL_GAP_SEARCH_RANGE = (36.0, 52.0)
+MIN_COL_GAP = 0.8
+
+# Linhas que fisicamente pertencem a mesma "linha logica" da tabela (mesmo
+# produto/preco) aparecem no PDF com pequenas variacoes de baseline (~0.1-0.4%
+# da altura da pagina). Linhas de produtos diferentes ficam bem mais afastadas
+# (~0.7% ou mais). Esse valor foi calibrado observando a distribuicao real de
+# gaps verticais nas paginas de preco ja extraidas.
+ROW_CLUSTER_GAP = 0.6
+
+# Dentro de cada meia-coluna, o texto da apresentacao (dosagem/forma/qtd) fica
+# a esquerda e a zona de precos (PF/PMC de cada faixa) fica mais a direita.
+PRICE_ZONE_MARGIN = 3.0
+
+# O laboratorio (quando impresso) fica bem afastado do nome/codigo do
+# produto na mesma linha -- maior do que qualquer espaco entre palavras de
+# uma mesma frase. Um limiar fixo de posicao X nao funciona porque a
+# indentacao da "meia-coluna" varia de pagina a pagina; em vez disso,
+# procuramos o maior espaco horizontal dentro da propria linha.
+NAME_LAB_GAP_THRESHOLD = 10.0
+
+# Substituicoes de caracteres corrompidos pela extracao de texto do PDF
+# (glifos de fontes customizadas decodificados incorretamente).
+OCR_CHAR_FIXES = [
+    ('€', 'C'),
+    ('«', 'x'),
+]
+
+PRICE_DECIMAL_RE = re.compile(r'^\d+,\d{1,2}$')
+PRICE_BARE_RE = re.compile(r'^\d{2,6}\]?$')
+NOISE_LINE_RE = re.compile(r'^\d+[\s\d%.,]*$')
+
+# Tokens que compoem as linhas de legenda/cabecalho repetidas no topo de
+# cada pagina de precos (lista de siglas de estado por faixa de desconto e
+# os percentuais de cada faixa), para nao serem confundidas com uma linha
+# de nome/laboratorio de produto.
+LEGEND_TOKEN_RE = re.compile(r'^([A-Z]{2,4},?|\(\d+\)|\d{1,3}(?:,\d+)?%(?:\(\d+\))?|—)$')
 
 all_products = []
 product_id_counter = 1
+
+
+def fix_ocr_chars(text):
+    for bad, good in OCR_CHAR_FIXES:
+        text = text.replace(bad, good)
+    return text
+
 
 def clean_product_name(name):
     name = re.sub(r'^\d+([.,]\d+)?\s*', '', name)
     name = re.sub(r'\s*\([Cc0-9IiDd]+\)\s*$', '', name)
     return name.strip()
 
-def format_price_val(val, is_pmc, pf_val=None):
-    if not val:
+
+def format_price_val(raw):
+    """Converte um token numerico bruto (com ou sem separador decimal) em
+    uma string monetaria formatada. Quando a virgula decimal esta ausente
+    (falha conhecida da extracao de texto para certas fontes), assume-se
+    2 casas decimais implicitas."""
+    if not raw:
         return ""
-    clean = val.replace(',', '.')
+    raw = raw.rstrip(']')
+    clean = raw.replace(',', '.')
     try:
         num = float(clean)
     except ValueError:
-        return val
-        
-    if '.' not in val:
-        if len(val) == 3:
-            if is_pmc and pf_val and pf_val > 10.0:
-                num = num / 10.0
-            else:
-                num = num / 100.0
-        else:
-            num = num / 100.0
-            
+        return ""
+    if ',' not in raw:
+        num = num / 100.0
     return f"R$ {num:,.2f}".replace('.', 'X').replace(',', '.').replace('X', ',')
 
-# As páginas de preço vão da 12 até a 198
+
+def find_column_split(words):
+    """Detecta dinamicamente o ponto de corte entre as duas meias-tabelas de
+    uma pagina, procurando o espaco horizontal vazio dentro da faixa onde a
+    quebra de coluna costuma ocorrer. Quando ha mais de um espaco vazio
+    candidato (ex: paginas com pouco texto no cabecalho geram gaps
+    "acidentais" do mesmo tamanho), prioriza o mais proximo da posicao
+    tipica da quebra em vez do simplesmente maior, pois um empate sempre
+    favorecia o gap errado (mais a esquerda)."""
+    xs = sorted({round(w[0], 2) for w in words if COL_GAP_SEARCH_RANGE[0] <= w[0] <= COL_GAP_SEARCH_RANGE[1]})
+    if len(xs) < 2:
+        return DEFAULT_COL_SPLIT
+
+    candidates = []
+    for i in range(1, len(xs)):
+        gap = xs[i] - xs[i - 1]
+        if gap >= MIN_COL_GAP:
+            candidates.append((xs[i] + xs[i - 1]) / 2)
+
+    if not candidates:
+        return DEFAULT_COL_SPLIT
+
+    return min(candidates, key=lambda mid: abs(mid - DEFAULT_COL_SPLIT))
+
+
+def cluster_rows(words):
+    """Agrupa palavras em linhas logicas por proximidade vertical, unindo
+    sub-linhas (baseline levemente deslocada) que pertencem a mesma linha
+    real da tabela."""
+    ordered = sorted(words, key=lambda w: w[1])
+    rows = []
+    current = []
+    last_y = None
+    for w in ordered:
+        y = w[1]
+        if last_y is not None and (y - last_y) > ROW_CLUSTER_GAP:
+            rows.append(current)
+            current = []
+        current.append(w)
+        last_y = y
+    if current:
+        rows.append(current)
+    return [sorted(r, key=lambda w: w[0]) for r in rows]
+
+
+def detect_price_anchors(rows, col_start):
+    """Varre as linhas de cabecalho da coluna (marcadas por tokens PF/PMC,
+    incluindo variantes com falha de OCR PE/PM) e retorna a lista ordenada
+    de posicoes X (relativas ao inicio da coluna) de cada par PF/PMC."""
+    pf_anchors = []
+    pmc_anchors = []
+    for row in rows:
+        for w in row:
+            token = w[4]
+            rel_x = w[0] - col_start
+            if token in ('PF', 'PE') and 0 <= rel_x <= 45:
+                pf_anchors.append(rel_x)
+            elif token in ('PMC', 'PM') and 0 <= rel_x <= 45:
+                pmc_anchors.append(rel_x)
+    pf_anchors.sort()
+    pmc_anchors.sort()
+    return pf_anchors, pmc_anchors
+
+
+def split_name_lab(words):
+    """Separa uma linha de nome/produto em (nome, laboratorio) procurando o
+    maior espaco horizontal entre palavras consecutivas. So considera que ha
+    um laboratorio separado se esse espaco for bem maior do que o espaco
+    normal entre palavras de uma mesma frase."""
+    if len(words) <= 1:
+        return [t for _, t in words], []
+
+    best_gap = 0.0
+    split_at = None
+    for i in range(1, len(words)):
+        gap = words[i][0] - words[i - 1][0]
+        if gap > best_gap:
+            best_gap = gap
+            split_at = i
+
+    if best_gap < NAME_LAB_GAP_THRESHOLD:
+        return [t for _, t in words], []
+
+    return [t for _, t in words[:split_at]], [t for _, t in words[split_at:]]
+
+
+def nearest_anchor_index(rel_x, anchors, max_dist=3.0):
+    best_i, best_d = None, max_dist
+    for i, a in enumerate(anchors):
+        d = abs(rel_x - a)
+        if d < best_d:
+            best_d = d
+            best_i = i
+    return best_i
+
+
+def process_column(rows, col_start):
+    global product_id_counter
+
+    pf_anchors, pmc_anchors = detect_price_anchors(rows, col_start)
+    if pf_anchors:
+        price_zone_start = min(pf_anchors[0], pmc_anchors[0] if pmc_anchors else pf_anchors[0]) - PRICE_ZONE_MARGIN
+    else:
+        price_zone_start = 15.0
+
+    current_name = None
+    current_lab = "N/D"
+    current_substance = None
+    expect_name = True
+    expect_substance = False
+
+    for row in rows:
+        words = [(w[0], fix_ocr_chars(w[4])) for w in row]
+        joined = ' '.join(t for _, t in words)
+        if not joined.strip():
+            continue
+
+        # Uma linha de apresentacao/preco sempre contem uma letra minuscula
+        # (mg, comp, cx...) ou um preco decimal. Digitos isolados nao bastam,
+        # pois codigos de classificacao como "(C1)"/"(B1)" tambem contem
+        # digitos mas pertencem a linha de nome/laboratorio.
+        is_presentation_row = bool(re.search(r'[a-z]', joined)) or bool(re.search(r'\d+,\d{2}', joined))
+
+        if not is_presentation_row:
+            text_upper = joined.upper()
+            if (
+                NOISE_LINE_RE.match(joined)
+                or 'PRODUTO' in text_upper
+                or 'PMC' in text_upper
+                or 'IMPORTANTE' in text_upper
+                or joined in ('PF', 'PE', 'PMC', 'PM')
+            ):
+                continue
+
+            has_legend_marker = any(
+                t == '—' or re.match(r'^\d{1,3}(,\d+)?%', t) or re.match(r'^\(\d+\)$', t)
+                for _, t in words
+            )
+            if has_legend_marker and all(LEGEND_TOKEN_RE.match(t) for _, t in words):
+                continue
+
+            name_words, lab_words = split_name_lab(words)
+
+            if expect_name:
+                current_name = clean_product_name(' '.join(name_words)) if name_words else clean_product_name(joined)
+                if lab_words:
+                    current_lab = ' '.join(lab_words).upper()
+                else:
+                    current_lab = "N/D"
+                current_substance = None
+                expect_name = False
+                expect_substance = True
+            elif expect_substance:
+                current_substance = clean_product_name(joined)
+                if lab_words and current_lab == "N/D":
+                    current_lab = ' '.join(lab_words).upper()
+                expect_substance = False
+            else:
+                # Continuacao de um nome/substancia que quebrou em mais de uma linha
+                if current_substance:
+                    current_substance = f"{current_substance} {clean_product_name(joined)}".strip()
+                else:
+                    current_substance = clean_product_name(joined)
+            continue
+
+        # Linha de apresentacao/precos. Uma linha deste tipo sempre marca o
+        # fim do bloco nome/laboratorio/substancia atual -- a proxima linha
+        # de nome encontrada deve iniciar um NOVO produto, mesmo que esta
+        # linha em particular nao contenha precos aproveitaveis (ex: numeros
+        # colados sem separador por falha da extracao de texto do PDF).
+        # Resetar aqui evita que uma linha de preco ilegivel "vaze" nomes de
+        # produtos diferentes para dentro da mesma substancia.
+        expect_name = True
+
+        if current_name is None:
+            continue
+
+        presentation_tokens = [t for x, t in words if (x - col_start) < price_zone_start]
+        price_tokens = [(x - col_start, t) for x, t in words if (x - col_start) >= price_zone_start]
+
+        presentation = ' '.join(presentation_tokens).strip()
+        presentation = re.sub(r'\.{2,}', '', presentation)
+        presentation = re.sub(r'\s+', ' ', presentation).strip(' .')
+        if not presentation:
+            presentation = "Unidade Padrao"
+
+        tiers = {}
+        for rel_x, token in price_tokens:
+            if PRICE_DECIMAL_RE.match(token) or PRICE_BARE_RE.match(token):
+                pf_i = nearest_anchor_index(rel_x, pf_anchors)
+                pmc_i = nearest_anchor_index(rel_x, pmc_anchors)
+                if pf_i is not None and (pmc_i is None or abs(rel_x - pf_anchors[pf_i]) <= abs(rel_x - pmc_anchors[pmc_i])):
+                    tiers.setdefault(pf_i, {})['pf'] = token
+                elif pmc_i is not None:
+                    tiers.setdefault(pmc_i, {})['pmc'] = token
+
+        if not tiers:
+            # Nenhum preco reconhecido nesta linha -- nao ha o suficiente
+            # para formar um registro de produto valido.
+            continue
+
+        tier0 = tiers.get(0, {})
+        pf20 = format_price_val(tier0.get('pf', ''))
+        pmc20 = format_price_val(tier0.get('pmc', ''))
+
+        pricing_tiers = []
+        for idx in sorted(tiers.keys()):
+            t = tiers[idx]
+            pricing_tiers.append({
+                "tier": idx + 1,
+                "pf": format_price_val(t.get('pf', '')),
+                "pmc": format_price_val(t.get('pmc', ''))
+            })
+
+        all_products.append({
+            "id": f"prod_{product_id_counter}",
+            "name": current_name or current_substance or "N/D",
+            "substance": current_substance or current_name or "N/D",
+            "lab": current_lab.upper(),
+            "presentation": presentation,
+            "pf20": pf20,
+            "pmc20": pmc20,
+            "pricingTiers": pricing_tiers,
+            "page": None,  # preenchido pelo chamador
+            "section": None,  # preenchido pelo chamador
+        })
+        product_id_counter += 1
+
+
+def process_page(words, page_num, section):
+    col_split = find_column_split(words)
+    left_words = [w for w in words if w[0] < col_split]
+    right_words = [w for w in words if w[0] >= col_split]
+
+    start_index = len(all_products)
+    process_column(cluster_rows(left_words), col_start=0.0)
+    process_column(cluster_rows(right_words), col_start=col_split)
+
+    for product in all_products[start_index:]:
+        product["page"] = page_num
+        product["section"] = section
+
+
+# As paginas de preco vao da 12 ate a 198
+section = "Lista A-Z"
 for page_num in range(12, 199):
     words_file = os.path.join(pages_dir, f"page_{page_num}.words.json")
     if not os.path.exists(words_file):
         continue
-        
+
     with open(words_file, "r", encoding="utf-8") as f:
         data = json.load(f)
-        
-    # Agrupar palavras em duas colunas fixas (X < 53.0 e X >= 53.0)
-    cols = {'left': [], 'right': []}
-    for w in data:
-        if w[0] < 53.0:
-            cols['left'].append(w)
-        else:
-            cols['right'].append(w)
-            
-    section = "Lista A-Z" # Padrão
-    
-    # Processar cada coluna individualmente para evitar mesclagem horizontal
-    for col_name, words in cols.items():
-        # Agrupar por altura Y com precisão de 0.1% para juntar palavras na mesma linha
-        lines_by_y = {}
-        for w in words:
-            y = round(w[1], 1)
-            if y not in lines_by_y: lines_by_y[y] = []
-            lines_by_y[y].append(w)
-            
-        current_product = ""
-        current_lab = "N/D"
-        current_substance = ""
-        
-        for y in sorted(lines_by_y.keys()):
-            # Ordenar palavras da linha da esquerda pra direita
-            line_words = sorted(lines_by_y[y], key=lambda x: x[0])
-            text = ' '.join([w[4] for w in line_words]).strip()
-            if not text: continue
-            
-            text_upper = text.upper()
-            
-            # Atualizar Seção caso apareça no topo
-            if "CENTRAL DE" in text_upper:
-                section = "Central de Preços"
-            
-            # Identificar linha de apresentação (contém letras minúsculas ou números de formatação)
-            # Na ABCFarma, apresentações contêm 'mg', 'ml', 'cx', 'comp', ou números com '...'
-            if re.search(r'[a-z0-9]', text):
-                # Tentar extrair preços (2 decimais estritos)
-                prices = re.findall(r'\d+[.,]\d{2}', text)
-                if len(prices) >= 2:
-                    # É uma apresentação válida com preços!
-                    pf_raw = prices[-2]
-                    pmc_raw = prices[-1]
-                    
-                    # Extrair o nome da apresentação (antes do primeiro preço encontrado)
-                    pres_match = re.split(r'\d+[.,]\d{2}', text)
-                    presentation = pres_match[0].strip()
-                    presentation = re.sub(r'(\.{2,}|\s+)$', '', presentation).strip()
-                    if not presentation:
-                        presentation = "Unidade Padrão"
-                    
-                    try:
-                        pf_float = float(pf_raw.replace(',', '.'))
-                        if '.' not in pf_raw: pf_float = pf_float / 100.0
-                    except:
-                        pf_float = 0.0
-                        
-                    # Extract inline product name if present at the end of the line
-                    inline_name_raw = pres_match[-1].strip()
-                    inline_name = re.sub(r'^[\d\s]+', '', inline_name_raw).strip()
-                    if len(inline_name) >= 3 and inline_name.upper() == inline_name:
-                        current_product = inline_name
-                        current_lab = inline_name
-                        current_substance = inline_name
 
-                    if current_product:
-                        all_products.append({
-                            "id": f"prod_{product_id_counter}",
-                            "name": current_product,
-                            "substance": clean_product_name(current_substance) or current_product,
-                            "lab": current_lab.upper(),
-                            "presentation": presentation,
-                            "pf20": format_price_val(pf_raw, False),
-                            "pmc20": format_price_val(pmc_raw, True, pf_float),
-                            "page": page_num,
-                            "section": section
-                        })
-                        product_id_counter += 1
-                        
-            # Se for tudo maiúsculo e tem mais de 3 letras, provavelmente é o nome de um produto ou lab
-            elif text_upper == text and len(text) > 3:
-                # Pular linhas de ruído ou títulos genéricos
-                if re.match(r'^\d+[\s\d%.,]*$', text) or "PRODUTO" in text or "PMC" in text:
-                    continue
-                    
-                cleaned_text = clean_product_name(text)
-                
-                # Regra heurística: nomes curtos podem ser laboratórios, nomes longos são substâncias
-                # mas o primeiro uppercase que encontramos geralmente é o Produto.
-                if len(cleaned_text) < 15 and "(GEN)" not in cleaned_text:
-                    current_lab = cleaned_text
-                current_product = cleaned_text
+    page_text_upper = ' '.join(w[4] for w in data).upper()
+    if "CENTRAL DE" in page_text_upper:
+        section = "Central de Precos"
+
+    process_page(data, page_num, section)
 
 with open(json_path, "w", encoding="utf-8") as f:
     json.dump(all_products, f, ensure_ascii=False, indent=2)
 
-print(f"Sucesso Total! A nova inteligência estruturou {len(all_products)} produtos (Motor OCR de Duas Colunas) salvos em {json_path}")
+print(f"Sucesso! {len(all_products)} produtos estruturados (deteccao de tabela por coordenadas) salvos em {json_path}")

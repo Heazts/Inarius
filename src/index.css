@@ -615,11 +615,14 @@ mark.highlight {
   background: var(--bg-app);
   overflow: auto;
   padding: 1.5rem;
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
   min-height: 580px;
   max-height: 750px;
+  /* Bloco normal (nao flex) de proposito: quando o conteudo dado zoom
+     ultrapassa a largura do viewport, um flex container com
+     justify-content:center pode deixar a borda esquerda do conteudo
+     inalcancavel ao rolar/arrastar em alguns motores de renderizacao.
+     Layout de bloco com margin:auto no filho rola corretamente para os
+     dois lados. */
 }
 
 .viewer-pdf-img {
