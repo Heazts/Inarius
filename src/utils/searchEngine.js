@@ -1,6 +1,7 @@
 /**
  * Inarius Ultra-Precision Multi-Token & Fuzzy Search Engine
- * Features: Multi-token AND matching, Levenshtein Fuzzy, Abbreviation Synonym Expansion, Weighted Scoring
+ * Features: Indice pre-computado, matching parcial com fallback, Levenshtein
+ * fuzzy, mapeamento de sinonimos farmaceuticos, scoring ponderado.
  */
 
 export function normalizeStr(str) {
@@ -72,10 +73,38 @@ export function levenshteinDistance(a, b) {
 }
 
 /**
+ * Distancia maxima tolerada para o fuzzy match de uma palavra, proporcional
+ * ao tamanho dela (em vez de um limiar fixo por faixa de tamanho). Isso
+ * deixa palavras longas tolerarem mais erros de digitacao/OCR sem abrir mao
+ * de precisao em palavras curtas.
+ */
+function maxFuzzyDistance(len) {
+  return Math.max(1, Math.min(3, Math.round(len * 0.3)));
+}
+
+/**
+ * Pre-computa os campos normalizados e a lista de palavras de cada produto
+ * uma unica vez, para nao ter que refazer esse trabalho a cada tecla
+ * digitada na busca (antes isso era refeito do zero em toda chamada,
+ * varrendo os ~17 mil produtos a cada keystroke).
+ */
+export function buildSearchIndex(products) {
+  if (!products) return [];
+  return products.map((p) => {
+    const normName = normalizeStr(p.name);
+    const normSubstance = normalizeStr(p.substance);
+    const normLab = normalizeStr(p.lab);
+    const normPres = normalizeStr(p.presentation);
+    const fullSearchStr = `${normName} ${normSubstance} ${normLab} ${normPres} PAGINA ${p.page}`;
+    const wordsList = fullSearchStr.split(/\s+/).filter(Boolean);
+    return { product: p, normName, normSubstance, normLab, normPres, fullSearchStr, wordsList };
+  });
+}
+
+/**
  * Token matcher: checks exact substring, synonym expansion, or fuzzy word match
  */
 function isTokenMatched(token, normFullText, wordsList) {
-  // Expand synonyms if token exists in dictionary
   const tokenVariants = ABBREVIATIONS_MAP[token] || [token];
 
   for (let v = 0; v < tokenVariants.length; v++) {
@@ -86,7 +115,7 @@ function isTokenMatched(token, normFullText, wordsList) {
 
     // 2. Fuzzy match for tokens with 4+ characters
     if (variant.length >= 4) {
-      const maxDistance = variant.length >= 7 ? 2 : 1;
+      const maxDistance = maxFuzzyDistance(variant.length);
       for (let i = 0; i < wordsList.length; i++) {
         const w = wordsList[i];
         if (w.length >= 3 && Math.abs(w.length - variant.length) <= maxDistance) {
@@ -101,11 +130,45 @@ function isTokenMatched(token, normFullText, wordsList) {
   return false;
 }
 
+function scoreEntry(entry, normQuery, tokens) {
+  const { normName, normSubstance, normPres, normLab } = entry;
+  let score = 0;
+
+  if (normName === normQuery) score += 250;
+  else if (normName.startsWith(normQuery)) score += 150;
+  else if (normName.includes(normQuery)) score += 80;
+
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t];
+    if (normName.includes(tok)) score += 40;
+    if (normSubstance.includes(tok)) score += 25;
+    if (normPres.includes(tok)) score += 20;
+    if (normLab.includes(tok)) score += 15;
+  }
+
+  return score;
+}
+
+const MAX_RESULTS = 300;
+const MAX_SUGGESTIONS = 20;
+
 /**
- * Main Search Execution Function
+ * Main Search Execution Function.
+ *
+ * Recebe o indice pre-computado (buildSearchIndex) em vez da lista crua de
+ * produtos. Diferente da versao anterior -- que exigia TODOS os tokens da
+ * busca baterem (E logico) e retornava um array vazio se um unico token
+ * nao combinasse com nada -- agora a busca sempre tenta entregar o melhor
+ * resultado possivel:
+ *   1. Produtos que combinam com TODOS os tokens (mais relevantes).
+ *   2. Se poucos ou nenhum resultado assim, tambem inclui produtos que
+ *      combinam com PARTE dos tokens, ordenados por quantos tokens bateram.
+ *   3. Se nada bateu com nenhum token (ex: erro de digitacao grande), cai
+ *      num ultimo recurso: compara a busca inteira com o nome dos produtos
+ *      via distancia de edicao e sugere os mais proximos.
  */
-export function executeSearch(products, query) {
-  if (!query || !query.trim() || !products || products.length === 0) {
+export function executeSearch(index, query) {
+  if (!query || !query.trim() || !index || index.length === 0) {
     return [];
   }
 
@@ -116,7 +179,7 @@ export function executeSearch(products, query) {
   if (pageMatch) {
     const pageNum = parseInt(pageMatch[1], 10);
     if (pageNum >= 1 && pageNum <= 200) {
-      return products.filter((p) => p.page === pageNum);
+      return index.filter((entry) => entry.product.page === pageNum).map((entry) => entry.product);
     }
   }
 
@@ -128,51 +191,62 @@ export function executeSearch(products, query) {
 
   if (tokens.length === 0) return [];
 
-  const matched = [];
+  const fullMatches = [];
+  const partialMatches = [];
 
-  for (let i = 0; i < products.length; i++) {
-    const p = products[i];
-    const normName = normalizeStr(p.name);
-    const normSubstance = normalizeStr(p.substance);
-    const normLab = normalizeStr(p.lab);
-    const normPres = normalizeStr(p.presentation);
+  for (let i = 0; i < index.length; i++) {
+    const entry = index[i];
 
-    const fullSearchStr = `${normName} ${normSubstance} ${normLab} ${normPres} PAGINA ${p.page}`;
-    const wordsList = fullSearchStr.split(/\s+/);
-
-    // Validate that ALL query tokens match the product full text
-    let allTokensMatched = true;
+    let matchedCount = 0;
     for (let t = 0; t < tokens.length; t++) {
-      if (!isTokenMatched(tokens[t], fullSearchStr, wordsList)) {
-        allTokensMatched = false;
-        break;
+      if (isTokenMatched(tokens[t], entry.fullSearchStr, entry.wordsList)) {
+        matchedCount += 1;
       }
     }
 
-    if (allTokensMatched) {
-      // Calculate weighted relevance score
-      let score = 0;
+    if (matchedCount === 0) continue;
 
-      // Exact name match or prefix
-      if (normName === normQuery) score += 250;
-      else if (normName.startsWith(normQuery)) score += 150;
-      else if (normName.includes(normQuery)) score += 80;
-
-      // Token matches in name & fields
-      for (let t = 0; t < tokens.length; t++) {
-        const tok = tokens[t];
-        if (normName.includes(tok)) score += 40;
-        if (normSubstance.includes(tok)) score += 25;
-        if (normPres.includes(tok)) score += 20;
-        if (normLab.includes(tok)) score += 15;
-      }
-
-      matched.push({ product: p, score });
+    const score = scoreEntry(entry, normQuery, tokens);
+    if (matchedCount === tokens.length) {
+      fullMatches.push({ product: entry.product, score });
+    } else {
+      partialMatches.push({ product: entry.product, score, matchedCount });
     }
   }
 
-  // Sort by score descending
-  matched.sort((a, b) => b.score - a.score);
+  fullMatches.sort((a, b) => b.score - a.score);
+  partialMatches.sort((a, b) => (b.matchedCount - a.matchedCount) || (b.score - a.score));
 
-  return matched.map((m) => m.product);
+  if (fullMatches.length > 0 || partialMatches.length > 0) {
+    const combined = fullMatches.concat(partialMatches).slice(0, MAX_RESULTS);
+    return combined.map((m) => m.product);
+  }
+
+  // 3. Ultimo recurso: nada bateu nem por substring nem por fuzzy em nenhum
+  // token -- provavelmente um erro de digitacao grande. Compara a busca
+  // inteira com o nome COMERCIAL e com a SUBSTANCIA (nome generico) de cada
+  // produto e sugere os mais proximos, em vez de devolver uma lista vazia.
+  // A substancia importa tanto quanto o nome aqui porque muitos produtos so
+  // tem o nome de marca no campo "name" (ex: "ABLOK") com o principio ativo
+  // que o usuario realmente busca (ex: "ATENOLOL") no campo "substance".
+  const suggestions = [];
+  for (let i = 0; i < index.length; i++) {
+    const entry = index[i];
+    let bestRatio = Infinity;
+    if (entry.normName) {
+      const d = levenshteinDistance(normQuery, entry.normName);
+      bestRatio = Math.min(bestRatio, d / Math.max(normQuery.length, entry.normName.length, 1));
+    }
+    if (entry.normSubstance && entry.normSubstance !== entry.normName) {
+      const d = levenshteinDistance(normQuery, entry.normSubstance);
+      bestRatio = Math.min(bestRatio, d / Math.max(normQuery.length, entry.normSubstance.length, 1));
+    }
+    if (bestRatio <= 0.5) {
+      suggestions.push({ product: entry.product, ratio: bestRatio });
+    }
+  }
+  suggestions.sort((a, b) => a.ratio - b.ratio);
+  const results = suggestions.slice(0, MAX_SUGGESTIONS).map((m) => m.product);
+  results.isApproximate = results.length > 0;
+  return results;
 }

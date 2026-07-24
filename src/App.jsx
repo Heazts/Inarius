@@ -5,7 +5,7 @@ import ResultCard from './components/ResultCard';
 import PdfViewer from './components/PdfViewer';
 import Sidebar from './components/Sidebar';
 import { Search } from 'lucide-react';
-import { executeSearch } from './utils/searchEngine.js';
+import { executeSearch, buildSearchIndex } from './utils/searchEngine.js';
 
 export default function App() {
   const [pagesData, setPagesData] = useState([]);
@@ -20,6 +20,7 @@ export default function App() {
   const [dataSource, setDataSource] = useState('principal'); // Data source selector (principal or fonte_grande)
   const [showHelp, setShowHelp] = useState(false);
   const [searchTimeMs, setSearchTimeMs] = useState(null);
+  const [isApproximate, setIsApproximate] = useState(false);
   
   // Favorites State (Local Storage)
   const [favorites, setFavorites] = useState(() => {
@@ -64,6 +65,11 @@ export default function App() {
       });
   }, [dataSource]);
 
+  // Indice de busca pre-computado uma unica vez por conjunto de dados
+  // (nao a cada tecla digitada), evitando refazer a normalizacao dos
+  // ~17 mil produtos em toda busca.
+  const searchIndex = useMemo(() => buildSearchIndex(productsData), [productsData]);
+
   // Execute reactive search using our high-precision Multi-Token & Fuzzy Search Engine
   useEffect(() => {
     if (!query.trim() || productsData.length === 0) {
@@ -74,8 +80,9 @@ export default function App() {
 
     const t0 = performance.now();
 
-    // 1. Execute Multi-Token + Fuzzy Engine Search
-    let results = executeSearch(productsData, query);
+    // 1. Execute Multi-Token + Fuzzy Engine Search (com fallback parcial/aproximado)
+    let results = executeSearch(searchIndex, query);
+    const wasApproximate = !!results.isApproximate;
 
     // 2. Filter by selected category pill
     if (selectedCategory === 'Favoritos') {
@@ -86,8 +93,9 @@ export default function App() {
 
     const t1 = performance.now();
     setSearchTimeMs(t1 - t0);
+    setIsApproximate(wasApproximate);
     setSearchResults(results);
-  }, [query, productsData, selectedCategory, favorites]);
+  }, [query, searchIndex, selectedCategory, favorites]);
 
   // Auto-select the first product result when searchResults updates
   useEffect(() => {
@@ -195,6 +203,11 @@ export default function App() {
             ) : query ? (
               searchResults.length > 0 ? (
                 <div className="results-scroll-container">
+                  {isApproximate && (
+                    <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', padding: '0.25rem 0.1rem' }}>
+                      Nao encontramos "{query}" exatamente. Mostrando os medicamentos com nome mais parecido.
+                    </p>
+                  )}
                   {searchResults.map((item) => (
                       <ResultCard
                         key={item.id}

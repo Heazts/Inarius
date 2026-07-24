@@ -24,7 +24,6 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
 
   // Panning State (mouse drag-to-move using native scroll)
   const [isPanning, setIsPanning] = useState(false);
-  const [startPos, setStartPos] = useState({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
 
   const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 300)); // up to 300% zoom
   const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 60));
@@ -196,35 +195,46 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
     return { leftRuler, rightRuler };
   }, [pageWords]);
 
+  // O drag-to-pan escuta mousemove/mouseup no window (nao no elemento do
+  // viewport) de proposito: o viewport costuma ser bem mais estreito que a
+  // pagina renderizada com zoom, entao um arrasto normal do mouse sai da
+  // area do elemento no meio do caminho. Se os listeners ficassem so no
+  // elemento, sair da area cancelava o pan (via mouseleave) antes do
+  // usuario terminar de mover, fazendo o lado esquerdo da tabela (fora da
+  // area visivel) parecer inalcancavel.
+  const panStateRef = React.useRef(null);
+
   const handleMouseDown = (e) => {
-    // Enable free drag panning on left mouse click
     if (e.button !== 0) return;
     const viewport = document.getElementById('pdf-viewport');
-    if (viewport) {
-      setIsPanning(true);
-      setStartPos({
-        x: e.clientX,
-        y: e.clientY,
-        scrollLeft: viewport.scrollLeft,
-        scrollTop: viewport.scrollTop
-      });
-    }
-  };
+    if (!viewport) return;
 
-  const handleMouseMove = (e) => {
-    if (!isPanning) return;
-    e.preventDefault();
-    const viewport = document.getElementById('pdf-viewport');
-    if (viewport) {
-      const dx = e.clientX - startPos.x;
-      const dy = e.clientY - startPos.y;
-      viewport.scrollLeft = startPos.scrollLeft - dx;
-      viewport.scrollTop = startPos.scrollTop - dy;
-    }
-  };
+    panStateRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop
+    };
+    setIsPanning(true);
 
-  const handleMouseUp = () => {
-    setIsPanning(false);
+    const onWindowMouseMove = (moveEvent) => {
+      if (!panStateRef.current) return;
+      moveEvent.preventDefault();
+      const dx = moveEvent.clientX - panStateRef.current.x;
+      const dy = moveEvent.clientY - panStateRef.current.y;
+      viewport.scrollLeft = panStateRef.current.scrollLeft - dx;
+      viewport.scrollTop = panStateRef.current.scrollTop - dy;
+    };
+
+    const onWindowMouseUp = () => {
+      panStateRef.current = null;
+      setIsPanning(false);
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+    };
+
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
   };
 
 
@@ -345,9 +355,6 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
         ref={viewerRef}
         className="viewer-viewport"
         onMouseDown={viewMode === 'image' ? handleMouseDown : undefined}
-        onMouseMove={viewMode === 'image' ? handleMouseMove : undefined}
-        onMouseUp={viewMode === 'image' ? handleMouseUp : undefined}
-        onMouseLeave={viewMode === 'image' ? handleMouseUp : undefined}
         onWheel={viewMode === 'image' ? handleWheel : undefined}
         style={{
           cursor: viewMode === 'image' ? (isPanning ? 'grabbing' : 'grab') : 'default',
@@ -376,6 +383,8 @@ export default function PdfViewer({ currentPage, totalPages, pageData, onPageCha
               className="viewer-pdf-img"
               style={{ display: 'block', width: '100%', height: 'auto', transform: 'none', boxShadow: 'none' }}
               loading="eager"
+              draggable={false}
+              onDragStart={(e) => e.preventDefault()}
             />
 
             {/* Keyword highlights overlay in VIVID RED */}
