@@ -1,15 +1,15 @@
 # Inarius v0.0.1 Beta
 
-O Inarius È um sistema de consulta focado na base de dados da ABCFarma (ediÁ„o de Junho de 2026).
+O Inarius √© um sistema de consulta focado na base de dados da ABCFarma (edi√ß√£o de Junho de 2026).
 
 > [!WARNING]
-> **Status do Projeto: VERS√O BETA**
-> Este software est· atualmente em fase Beta de desenvolvimento e testes. O sistema ainda apresenta falhas, erros de OCR e imprecisıes no motor de pesquisa. Os resultados exibidos podem n„o estar perfeitamente formatados ou n„o refletir 100% o documento original devido ‡s limitaÁıes moment‚neas de extraÁ„o.
+> **Status do Projeto: VERS√ÉO BETA**
+> Este software est√° atualmente em fase Beta de desenvolvimento e testes. O sistema ainda apresenta falhas, erros de OCR e imprecis√µes no motor de pesquisa. Os resultados exibidos podem n√£o estar perfeitamente formatados ou n√£o refletir 100% o documento original devido √†s limita√ß√µes moment√¢neas de extra√ß√£o.
 
 ## Funcionalidades Atuais
-- **VisualizaÁ„o de PDF**: IntegraÁ„o da p·gina do cat·logo atrelada ao resultado da busca.
+- **Visualiza√ß√£o de PDF**: Integra√ß√£o da p√°gina do cat√°logo atrelada ao resultado da busca.
 - **UX**: Design minimalista em temas High-Contrast.
-- **Favoritos**: Salvamento tempor·rio de itens em cache local.
+- **Favoritos**: Salvamento tempor√°rio de itens em cache local.
 
 ## Origem dos Dados
-Todos os dados estruturados neste projeto refletem o repositÛrio da ABCFarma - Junho de 2026 (sujeito a erros de transcriÁ„o da vers„o Beta).
+Todos os dados estruturados neste projeto refletem o reposit√≥rio da ABCFarma - Junho de 2026 (sujeito a erros de transcri√ß√£o da vers√£o Beta).
