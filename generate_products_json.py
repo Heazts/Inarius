@@ -29,6 +29,12 @@ ROW_CLUSTER_GAP = 0.6
 # a esquerda e a zona de precos (PF/PMC de cada faixa) fica mais a direita.
 PRICE_ZONE_MARGIN = 3.0
 
+# Tolerancia de "mesma linha visual" ao ordenar por Y: palavras que
+# deveriam estar na mesma linha as vezes tem uma diferenca de sub-pixel no
+# Y (ex: 15.90 vs 15.94) por causa de fonte/peso diferentes -- bem menor
+# do que a diferenca real entre duas sub-linhas distintas (ROW_CLUSTER_GAP).
+ROW_Y_JITTER = 0.15
+
 # O laboratorio (quando impresso) fica bem afastado do nome/codigo do
 # produto na mesma linha -- maior do que qualquer espaco entre palavras de
 # uma mesma frase. Um limiar fixo de posicao X nao funciona porque a
@@ -64,7 +70,9 @@ def fix_ocr_chars(text):
 
 
 def clean_product_name(name):
-    name = re.sub(r'^\d+([.,]\d+)?\s*', '', name)
+    # Remove TODOS os tokens numericos soltos no inicio (as vezes mais de
+    # um numero de referencia/preco fica grudado antes do nome de verdade).
+    name = re.sub(r'^(\d+([.,]\d+)?\s+)+', '', name)
     name = re.sub(r'\s*\([Cc0-9IiDd]+\)\s*$', '', name)
     return name.strip()
 
@@ -88,13 +96,26 @@ def format_price_val(raw):
 
 
 def find_column_split(words):
-    """Detecta dinamicamente o ponto de corte entre as duas meias-tabelas de
-    uma pagina, procurando o espaco horizontal vazio dentro da faixa onde a
-    quebra de coluna costuma ocorrer. Quando ha mais de um espaco vazio
-    candidato (ex: paginas com pouco texto no cabecalho geram gaps
-    "acidentais" do mesmo tamanho), prioriza o mais proximo da posicao
-    tipica da quebra em vez do simplesmente maior, pois um empate sempre
-    favorecia o gap errado (mais a esquerda)."""
+    """Detecta o ponto de corte entre as duas meias-tabelas de uma pagina.
+
+    Toda pagina de precos repete o cabecalho da coluna duas vezes -- uma
+    para a coluna esquerda, outra para a direita -- e cada uma comeca com
+    a palavra "Produto" (a da direita costuma vir colada ao caractere
+    separador da tabela, ex: "||Produto"). Essa posicao e um sinal direto
+    e muito mais confiavel do que tentar adivinhar por "maior espaco vazio
+    horizontal": a posicao real da quebra varia bastante de pagina a
+    pagina (de x=37 a x=55 nas paginas verificadas), entao um intervalo de
+    busca fixo para o gap deixava passar despercebidas paginas inteiras
+    com a quebra fora do intervalo esperado -- foi o caso, por exemplo, de
+    produtos como o ATENTAN (atomoxetina) na pagina 27, que ficaram de
+    fora do extrato final por causa disso.
+    """
+    produto_tokens = sorted((w[0] for w in words if 'Produto' in w[4]))
+    if len(produto_tokens) >= 2:
+        return produto_tokens[1] - 0.5
+
+    # Fallback por espaco horizontal vazio, para paginas sem o cabecalho
+    # repetido (ex: capa, orientacoes, paginas de rosto de secao).
     xs = sorted({round(w[0], 2) for w in words if COL_GAP_SEARCH_RANGE[0] <= w[0] <= COL_GAP_SEARCH_RANGE[1]})
     if len(xs) < 2:
         return DEFAULT_COL_SPLIT
@@ -131,19 +152,34 @@ def cluster_rows(words):
     return [sorted(r, key=lambda w: w[0]) for r in rows]
 
 
+HEADER_ROW_MAX_Y = 11.0
+
+
 def detect_price_anchors(rows, col_start):
     """Varre as linhas de cabecalho da coluna (marcadas por tokens PF/PMC,
     incluindo variantes com falha de OCR PE/PM) e retorna a lista ordenada
-    de posicoes X (relativas ao inicio da coluna) de cada par PF/PMC."""
+    de posicoes X (relativas ao inicio da coluna) de cada par PF/PMC.
+
+    O filtro usa a posicao vertical (perto do topo da pagina), nao um
+    limite fixo de posicao horizontal: a largura da coluna varia de
+    pagina a pagina (ja vimos colunas com a ultima ancora de preco alem
+    de x=50), entao um teto fixo de X para "o que conta como cabecalho"
+    descartava ancoras legitimas de faixas de desconto mais altas (tier 4
+    e 5) em paginas com coluna mais larga.
+    """
     pf_anchors = []
     pmc_anchors = []
     for row in rows:
         for w in row:
+            if w[1] > HEADER_ROW_MAX_Y:
+                continue
             token = w[4]
             rel_x = w[0] - col_start
-            if token in ('PF', 'PE') and 0 <= rel_x <= 45:
+            if rel_x < 0:
+                continue
+            if token in ('PF', 'PE'):
                 pf_anchors.append(rel_x)
-            elif token in ('PMC', 'PM') and 0 <= rel_x <= 45:
+            elif token in ('PMC', 'PM'):
                 pmc_anchors.append(rel_x)
     pf_anchors.sort()
     pmc_anchors.sort()
@@ -182,6 +218,85 @@ def nearest_anchor_index(rel_x, anchors, max_dist=3.0):
     return best_i
 
 
+def price_slot_for_token(rel_x, token, pf_anchors, pmc_anchors):
+    """Identifica a qual faixa de desconto (tier) e coluna (PF ou PMC) um
+    token numerico pertence, com base na ancora de cabecalho mais proxima.
+    Retorna None se o token nao parece um preco ou nao ha ancora perto o
+    suficiente."""
+    if not (PRICE_DECIMAL_RE.match(token) or PRICE_BARE_RE.match(token)):
+        return None
+    pf_i = nearest_anchor_index(rel_x, pf_anchors)
+    pmc_i = nearest_anchor_index(rel_x, pmc_anchors)
+    if pf_i is not None and (pmc_i is None or abs(rel_x - pf_anchors[pf_i]) <= abs(rel_x - pmc_anchors[pmc_i])):
+        return ('pf', pf_i)
+    if pmc_i is not None:
+        return ('pmc', pmc_i)
+    return None
+
+
+def split_by_price_collision(words, col_start, pf_anchors, pmc_anchors, price_zone_start):
+    """Divide uma linha logica (ja agrupada por proximidade vertical) em
+    varias, caso ela contenha DOIS valores para a MESMA faixa de desconto
+    -- o que so acontece quando duas apresentacoes/precos diferentes foram
+    fundidos por engano em uma unica linha.
+
+    Isso resolve um problema que o agrupamento por proximidade vertical
+    sozinho nao consegue: em secoes do documento com entrelinhamento mais
+    apertado, o espaco vertical entre o final de uma linha de preco e o
+    inicio da proxima pode ser menor do que o espaco entre as
+    "sub-linhas" (numero/texto) de uma UNICA linha, entao nenhum limiar
+    fixo de distancia separa os dois casos corretamente. Como cada faixa
+    de desconto so pode aparecer uma vez por produto/apresentacao, usar
+    a colisao de faixa como sinal de corte e muito mais confiavel do que
+    tentar adivinhar pela distancia vertical.
+
+    A ordenacao usa o Y "agrupado" (arredondado por ROW_Y_JITTER) em vez
+    do Y bruto: palavras da MESMA linha visual as vezes tem Y com uma
+    diferenca de sub-pixel (ex: 15.90 vs 15.94) por causa de fonte/peso
+    diferentes, e isso e bem menor do que a diferenca real entre
+    sub-linhas distintas (~0.27+). Ordenar pelo Y bruto podia inverter a
+    ordem esquerda-direita dentro de uma unica linha (nome vindo depois
+    do laboratorio, por exemplo) so por causa desse jitter.
+    """
+    def sort_key(w):
+        return (round(w[1] / ROW_Y_JITTER), w[0])
+
+    ordered = sorted(words, key=sort_key)
+    result_rows = []
+    current = []
+    filled_slots = set()
+
+    for w in ordered:
+        rel_x = w[0] - col_start
+        slot = None
+        if rel_x >= price_zone_start:
+            slot = price_slot_for_token(rel_x, w[4], pf_anchors, pmc_anchors)
+
+        if slot is not None:
+            if slot in filled_slots:
+                if current:
+                    result_rows.append(current)
+                current = []
+                filled_slots = set()
+            filled_slots.add(slot)
+
+        current.append(w)
+
+    if current:
+        result_rows.append(current)
+
+    # A saida e reordenada por X puro (nao pelo Y agrupado usado acima): o
+    # agrupamento por Y ajuda a detectar colisao na ordem certa, mas usa-lo
+    # tambem na ordem final agrupa demais em paginas com mais sub-linhas,
+    # piorando a separacao nome/laboratorio (testado: quase triplicou a taxa
+    # de laboratorio nao encontrado). Ordenar por X puro deixa raramente
+    # 2 sub-linhas com o mesmo X inicial fora de ordem entre si (cosmetico,
+    # ex: texto de apresentacao com palavras fora de ordem) mas preserva a
+    # separacao correta de nome/laboratorio na maioria dos casos, que
+    # importa mais.
+    return [sorted(r, key=lambda w: w[0]) for r in result_rows]
+
+
 def process_column(rows, col_start):
     global product_id_counter
 
@@ -190,6 +305,11 @@ def process_column(rows, col_start):
         price_zone_start = min(pf_anchors[0], pmc_anchors[0] if pmc_anchors else pf_anchors[0]) - PRICE_ZONE_MARGIN
     else:
         price_zone_start = 15.0
+
+    split_rows = []
+    for row in rows:
+        split_rows.extend(split_by_price_collision(row, col_start, pf_anchors, pmc_anchors, price_zone_start))
+    rows = split_rows
 
     current_name = None
     current_lab = "N/D"
@@ -225,6 +345,16 @@ def process_column(rows, col_start):
                 for _, t in words
             )
             if has_legend_marker and all(LEGEND_TOKEN_RE.match(t) for _, t in words):
+                continue
+
+            # Uma linha de nome/laboratorio de verdade sempre comeca perto da
+            # margem esquerda da coluna (zona de texto). Se TODAS as palavras
+            # da linha estiverem dentro da zona de precos, isso nao e um nome
+            # -- e sobra de uma linha de preco corrompida (numeros com letras
+            # coladas por falha da extracao, ex: "N731", "NM") que nao bateu
+            # com o regex de preco valido. Tratar isso como nome contaminaria
+            # o produto seguinte com lixo; melhor ignorar a linha.
+            if all((x - col_start) >= price_zone_start for x, _ in words):
                 continue
 
             name_words, lab_words = split_name_lab(words)

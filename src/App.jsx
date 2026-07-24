@@ -4,6 +4,7 @@ import SearchBar from './components/SearchBar';
 import ResultCard from './components/ResultCard';
 import PdfViewer from './components/PdfViewer';
 import Sidebar from './components/Sidebar';
+import MissingMedications from './components/MissingMedications';
 import { Search } from 'lucide-react';
 import { executeSearch, buildSearchIndex } from './utils/searchEngine.js';
 
@@ -17,7 +18,6 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState('Tudo');
   const [currentPage, setCurrentPage] = useState(1);
   const [designStyle, setDesignStyle] = useState('vercel'); // Design system selector (grok or vercel)
-  const [dataSource, setDataSource] = useState('principal'); // Data source selector (principal or fonte_grande)
   const [showHelp, setShowHelp] = useState(false);
   const [searchTimeMs, setSearchTimeMs] = useState(null);
   const [isApproximate, setIsApproximate] = useState(false);
@@ -38,21 +38,48 @@ export default function App() {
 
   const toggleFavorite = (productId, e) => {
     e.stopPropagation();
-    setFavorites(prev => 
-      prev.includes(productId) 
+    setFavorites(prev =>
+      prev.includes(productId)
         ? prev.filter(id => id !== productId)
         : [...prev, productId]
     );
   };
 
-  // Fetch JSON databases based on selected data source
+  // Missing Medications State (Local Storage) -- lista de nomes que a busca
+  // nao encontrou, para conferir depois na revista fisica ou repassar a
+  // quem atualiza a base de dados.
+  const [missingMeds, setMissingMeds] = useState(() => {
+    try {
+      const saved = localStorage.getItem('inarius_missing_meds');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem('inarius_missing_meds', JSON.stringify(missingMeds));
+  }, [missingMeds]);
+
+  const addMissingMed = (term) => {
+    setMissingMeds(prev => {
+      const alreadyExists = prev.some(it => it.term.toLowerCase() === term.toLowerCase());
+      if (alreadyExists) return prev;
+      return [...prev, { id: Date.now(), term, timestamp: new Date().toISOString() }];
+    });
+  };
+
+  const removeMissingMed = (id) => {
+    setMissingMeds(prev => prev.filter(it => it.id !== id));
+  };
+
+  // Fetch JSON databases
   useEffect(() => {
     setLoading(true);
-    const targetProductsPath = dataSource === 'fonte_grande' ? '/fonte_grande.json' : '/products.json';
 
     Promise.all([
       fetch('/pdf_data.json').then((res) => res.json()),
-      fetch(targetProductsPath).then((res) => res.json())
+      fetch('/products.json').then((res) => res.json())
     ])
       .then(([pages, products]) => {
         setPagesData(pages);
@@ -63,7 +90,7 @@ export default function App() {
         console.error('Erro ao carregar os dados cadastrados:', err);
         setLoading(false);
       });
-  }, [dataSource]);
+  }, []);
 
   // Indice de busca pre-computado uma unica vez por conjunto de dados
   // (nao a cada tecla digitada), evitando refazer a normalizacao dos
@@ -140,8 +167,6 @@ export default function App() {
       <Header
         designStyle={designStyle}
         setDesignStyle={setDesignStyle}
-        dataSource={dataSource}
-        setDataSource={setDataSource}
         totalProducts={productsData.length}
         onShowHelp={() => setShowHelp(true)}
       />
@@ -204,9 +229,18 @@ export default function App() {
               searchResults.length > 0 ? (
                 <div className="results-scroll-container">
                   {isApproximate && (
-                    <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', padding: '0.25rem 0.1rem' }}>
-                      Nao encontramos "{query}" exatamente. Mostrando os medicamentos com nome mais parecido.
-                    </p>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', padding: '0.25rem 0.1rem' }}>
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                        Nao encontramos "{query}" exatamente. Mostrando os medicamentos com nome mais parecido.
+                      </p>
+                      <button
+                        onClick={() => addMissingMed(query.trim())}
+                        className="btn"
+                        style={{ padding: '0.2rem 0.5rem', fontSize: '0.65rem', flexShrink: 0 }}
+                      >
+                        Não é isso? Anotar
+                      </button>
+                    </div>
                   )}
                   {searchResults.map((item) => (
                       <ResultCard
@@ -228,6 +262,13 @@ export default function App() {
                   <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
                     Verifique a grafia ou tente termos aproximados.
                   </p>
+                  <button
+                    onClick={() => addMissingMed(query.trim())}
+                    className="btn"
+                    style={{ padding: '0.3rem 0.6rem', fontSize: '0.7rem', margin: '0.6rem auto 0' }}
+                  >
+                    Adicionar "{query}" à lista de pendências
+                  </button>
                 </div>
               )
             ) : (
@@ -254,7 +295,12 @@ export default function App() {
           </div>
 
           {/* 3. Sidebar navigation widgets (PLACED AT THE BOTTOM OF LEFT COLUMN!) */}
-          <div style={{ marginTop: '0.5rem' }}>
+          <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <MissingMedications
+              items={missingMeds}
+              onAdd={addMissingMed}
+              onRemove={removeMissingMed}
+            />
             <Sidebar
               pagesData={pagesData}
               onJumpToPage={handleSelectPage}
